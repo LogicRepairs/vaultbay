@@ -1,0 +1,47 @@
+{
+  "name": "vaultbay",
+  "version": "1.0.0",
+  "description": "Professional NAS software for spare drives — partition, encrypt, share, and map across macOS, Linux, and Windows.",
+  "main": "./out/main/index.js",
+  "author": "VaultBay",
+  "license": "MIT",
+  "homepage": "https://github.com/LogicRepairs/vaultbay",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LogicRepairs/vaultbay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LogicRepairs/vaultbay/issues"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:all": "npm run build && electron-builder -mwl",
+    "release": "npm run build && electron-builder --publish always",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "lucide-react": "^0.468.0",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}
