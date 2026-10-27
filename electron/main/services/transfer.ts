@@ -9,7 +9,7 @@ import {
   type ServerResponse
 } from 'http'
 import { networkInterfaces } from 'os'
-import { basename, join, relative, resolve, sep } from 'path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'path'
 import { pipeline } from 'stream/promises'
 import dgram from 'dgram'
 import type { DiscoveredHost, HostSession, OperationResult, RemoteEntry } from '../../../src/shared/types'
@@ -42,11 +42,60 @@ function hashPin(pin: string): string {
   return createHash('sha256').update(`vaultbay-pin:${pin}`).digest('hex')
 }
 
+function toPosix(p: string): string {
+  return p.split(sep).join('/').replace(/^\.\//, '')
+}
+
+/** Resolve a request path inside the shared root (handles Windows/mac trailing slashes & separators). */
 function safeJoin(root: string, requested: string): string | null {
-  const cleaned = (requested || '.').replace(/^\/+/, '')
-  const full = resolve(root, cleaned)
-  if (!full.startsWith(root + sep) && full !== root) return null
+  const rootResolved = resolve(root)
+  let cleaned = (requested || '.').trim()
+  if (!cleaned || cleaned === '.' || cleaned === './' || cleaned === '.\\') {
+    return rootResolved
+  }
+
+  cleaned = cleaned.replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!cleaned || cleaned === '.') return rootResolved
+
+  // Block absolute / drive-letter escapes
+  if (isAbsolute(cleaned) || /^[a-zA-Z]:/.test(cleaned)) return null
+  if (cleaned.split('/').some((part) => part === '..')) return null
+
+  const full = resolve(rootResolved, cleaned)
+  const rel = relative(rootResolved, full)
+  if (rel.startsWith('..') || isAbsolute(rel)) return null
+
+  // Case-insensitive containment check for Windows drive letters
+  const rootKey = rootResolved.toLowerCase()
+  const fullKey = full.toLowerCase()
+  if (fullKey !== rootKey && !fullKey.startsWith(rootKey.endsWith(sep) ? rootKey : rootKey + sep)) {
+    return null
+  }
   return full
+}
+
+async function listDirectory(rootPath: string, target: string): Promise<RemoteEntry[]> {
+  const entries = await readdir(target, { withFileTypes: true })
+  const mapped: RemoteEntry[] = []
+  for (const entry of entries) {
+    if (entry.name === '.' || entry.name === '..') continue
+    const full = join(target, entry.name)
+    try {
+      const s = await stat(full)
+      const isDirectory = s.isDirectory()
+      mapped.push({
+        name: entry.name,
+        path: toPosix(relative(rootPath, full)) || entry.name,
+        isDirectory,
+        size: isDirectory ? 0 : s.size,
+        mtime: s.mtime.toISOString()
+      })
+    } catch {
+      // Skip entries we cannot stat (permissions, broken links)
+    }
+  }
+  mapped.sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name))
+  return mapped
 }
 
 function lanAddresses(): string[] {
@@ -141,6 +190,7 @@ export class TransferService {
     await this.stopHost()
 
     const port = input.port || DEFAULT_TRANSFER_PORT
+    // resolve() strips trailing separators (except drive roots) so folder opens stay valid
     this.rootPath = resolve(input.rootPath)
     this.pinHash = hashPin(input.pin)
     this.tokens.clear()
@@ -313,36 +363,42 @@ export class TransferService {
       return
     }
 
-    if (path === '/list' && req.method === 'GET') {
-      const target = safeJoin(this.rootPath, url.searchParams.get('path') || '.')
-      if (!target) {
-        json(res, 400, { ok: false, message: 'Invalid path' })
-        return
-      }
-      const entries = await readdir(target, { withFileTypes: true })
-      const mapped: RemoteEntry[] = []
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue
-        const full = join(target, entry.name)
+    if (path === '/list' && (req.method === 'GET' || req.method === 'POST')) {
+      let requested = url.searchParams.get('path') || '.'
+      if (req.method === 'POST') {
         try {
-          const s = await stat(full)
-          mapped.push({
-            name: entry.name,
-            path: relative(this.rootPath, full).split(sep).join('/'),
-            isDirectory: entry.isDirectory(),
-            size: s.size,
-            mtime: s.mtime.toISOString()
-          })
+          const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as { path?: string }
+          if (body.path != null) requested = body.path
         } catch {
-          // skip inaccessible
+          json(res, 400, { ok: false, message: 'Invalid list request' })
+          return
         }
       }
-      mapped.sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name))
-      json(res, 200, {
-        ok: true,
-        path: relative(this.rootPath, target).split(sep).join('/') || '.',
-        entries: mapped
-      })
+
+      const target = safeJoin(this.rootPath, requested)
+      if (!target) {
+        json(res, 400, { ok: false, message: `Invalid path: ${requested}` })
+        return
+      }
+
+      try {
+        const targetStat = await stat(target)
+        if (!targetStat.isDirectory()) {
+          json(res, 400, { ok: false, message: 'Not a folder' })
+          return
+        }
+        const mapped = await listDirectory(this.rootPath, target)
+        json(res, 200, {
+          ok: true,
+          path: toPosix(relative(this.rootPath, target)) || '.',
+          entries: mapped
+        })
+      } catch (error) {
+        json(res, 500, {
+          ok: false,
+          message: error instanceof Error ? error.message : 'Could not read folder'
+        })
+      }
       return
     }
 
@@ -429,8 +485,9 @@ export class TransferService {
   }
 
   async clientList(host: string, port: number, token: string, path: string): Promise<RemoteEntry[]> {
-    const { status, data } = await httpJson(host, port, 'GET', `/list?path=${encodeURIComponent(path || '.')}`, {
-      token
+    const { status, data } = await httpJson(host, port, 'POST', '/list', {
+      token,
+      body: { path: path || '.' }
     })
     if (status >= 400 || !data.ok) throw new Error(String(data.message || 'List failed'))
     return (data.entries as RemoteEntry[]) || []

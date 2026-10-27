@@ -59,10 +59,11 @@ export function ClientSimple({
 
   async function openFolder(nextPath: string) {
     if (!conn) return
+    const normalized = !nextPath || nextPath === '/' ? '.' : nextPath.replace(/^\/+/, '').replace(/\\/g, '/')
     setBusy(true)
     try {
-      const list = await api().listRemote(conn, nextPath)
-      setPath(nextPath || '.')
+      const list = await api().listRemote(conn, normalized)
+      setPath(normalized || '.')
       setEntries(list)
     } catch (e) {
       onToast('Could not open folder', e instanceof Error ? e.message : 'Error')
@@ -227,7 +228,13 @@ export function ClientSimple({
                 </thead>
                 <tbody>
                   {entries.map((entry) => (
-                    <tr key={entry.path}>
+                    <tr
+                      key={entry.path}
+                      style={{ cursor: entry.isDirectory ? 'pointer' : undefined }}
+                      onDoubleClick={() => {
+                        if (entry.isDirectory && !busy) openFolder(entry.path)
+                      }}
+                    >
                       <td>
                         <strong>{entry.name}</strong>
                         <div className="meta">{entry.isDirectory ? 'Folder' : 'File'}</div>
@@ -235,11 +242,25 @@ export function ClientSimple({
                       <td>{entry.isDirectory ? '—' : formatBytes(entry.size)}</td>
                       <td>
                         {entry.isDirectory ? (
-                          <button className="btn secondary" disabled={busy} onClick={() => openFolder(entry.path)}>
+                          <button
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openFolder(entry.path)
+                            }}
+                          >
                             <FolderOpen size={16} /> Open
                           </button>
                         ) : (
-                          <button className="btn secondary" disabled={busy} onClick={() => download(entry)}>
+                          <button
+                            className="btn secondary"
+                            disabled={busy}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              download(entry)
+                            }}
+                          >
                             <Download size={16} /> Download
                           </button>
                         )}
