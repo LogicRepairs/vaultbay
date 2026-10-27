@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "description": "Professional NAS software for spare drives — partition, encrypt, share, and map across macOS, Linux, and Windows.",
   "main": "./out/main/index.js",
-  "author": "VaultBay",
+  "author": {
+    "name": "LogicRepairs",
+    "email": "vaultbay@logicrepairs.local"
+  },
   "license": "MIT",
   "homepage": "https://github.com/LogicRepairs/vaultbay",
   "repository": {

@@ -52,6 +52,7 @@ portable:
 
 linux:
   category: Utility
+  maintainer: LogicRepairs <vaultbay@logicrepairs.local>
   target:
     - target: AppImage
       arch:
