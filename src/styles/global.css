@@ -770,8 +770,81 @@ button.choice-row:hover {
   background: var(--accent-soft);
 }
 
+.transfer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.dual-pane {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  min-height: 520px;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 520px;
+}
+
+.pane-body {
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  flex: 1;
+  max-height: 520px;
+}
+
+.pane-footer {
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.file-row:hover {
+  border-color: var(--line-strong);
+}
+
+.file-row.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fav-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 8px;
+}
+
+.fav-row .chip {
+  cursor: pointer;
+  border: 0;
+}
+
 @media (max-width: 860px) {
   .mode-cards {
+    grid-template-columns: 1fr;
+  }
+  .dual-pane {
     grid-template-columns: 1fr;
   }
 }

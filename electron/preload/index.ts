@@ -44,7 +44,19 @@ const api: VaultBayApi = {
   downloadRemote: (conn, remotePath) => ipcRenderer.invoke('vaultbay:downloadRemote', conn, remotePath),
   uploadToRemote: (conn, remoteFolder) =>
     ipcRenderer.invoke('vaultbay:uploadToRemote', conn, remoteFolder),
-  openReleasesPage: () => ipcRenderer.invoke('vaultbay:openReleasesPage')
+  openReleasesPage: () => ipcRenderer.invoke('vaultbay:openReleasesPage'),
+  getLocalRoots: () => ipcRenderer.invoke('vaultbay:getLocalRoots'),
+  listLocal: (path) => ipcRenderer.invoke('vaultbay:listLocal', path),
+  pickLocalFolder: () => ipcRenderer.invoke('vaultbay:pickLocalFolder'),
+  transferHostToLaptop: (conn, remotePath, localDestFolder) =>
+    ipcRenderer.invoke('vaultbay:transferHostToLaptop', conn, remotePath, localDestFolder),
+  transferLaptopToHost: (conn, localPath, remoteDestFolder) =>
+    ipcRenderer.invoke('vaultbay:transferLaptopToHost', conn, localPath, remoteDestFolder),
+  onTransferProgress: (handler) => {
+    const listener = (_event: IpcRendererEvent, message: string) => handler(message)
+    ipcRenderer.on('vaultbay:transfer-progress', listener)
+    return () => ipcRenderer.removeListener('vaultbay:transfer-progress', listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('vaultbay', api)

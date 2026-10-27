@@ -157,6 +157,20 @@ export interface RemoteEntry {
   mtime: string
 }
 
+export interface LocalEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+  size: number
+  mtime: string
+}
+
+export interface LocalRoots {
+  home: string
+  favorites: { name: string; path: string }[]
+  drives: { name: string; path: string }[]
+}
+
 export interface ClientConnection {
   host: string
   port: number
@@ -203,4 +217,18 @@ export interface VaultBayApi {
   downloadRemote: (conn: ClientConnection, remotePath: string) => Promise<OperationResult>
   uploadToRemote: (conn: ClientConnection, remoteFolder: string) => Promise<OperationResult>
   openReleasesPage: () => Promise<void>
+  getLocalRoots: () => Promise<LocalRoots>
+  listLocal: (path: string) => Promise<LocalEntry[]>
+  pickLocalFolder: () => Promise<string | null>
+  transferHostToLaptop: (
+    conn: ClientConnection,
+    remotePath: string,
+    localDestFolder: string
+  ) => Promise<OperationResult>
+  transferLaptopToHost: (
+    conn: ClientConnection,
+    localPath: string,
+    remoteDestFolder: string
+  ) => Promise<OperationResult>
+  onTransferProgress: (handler: (message: string) => void) => () => void
 }

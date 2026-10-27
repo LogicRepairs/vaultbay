@@ -571,4 +571,124 @@ export class TransferService {
     })
     return { ok: true, message: `Uploaded ${name}` }
   }
+
+  async clientMkdir(host: string, port: number, token: string, parentPath: string, name: string) {
+    const { status, data } = await httpJson(host, port, 'POST', '/mkdir', {
+      token,
+      body: { path: parentPath || '.', name }
+    })
+    if (status >= 400 || !data.ok) throw new Error(String(data.message || 'Could not create folder'))
+  }
+
+  /** Download a remote file or whole folder tree into a local destination folder. */
+  async transferRemoteToLocal(
+    host: string,
+    port: number,
+    token: string,
+    remotePath: string,
+    localDestFolder: string,
+    onProgress?: (message: string) => void
+  ): Promise<OperationResult> {
+    const { mkdir } = await import('fs/promises')
+    await mkdir(localDestFolder, { recursive: true })
+
+    const remoteName = basename(remotePath.replace(/\\/g, '/')) || 'download'
+    // Detect whether remote path is a folder by listing parent / trying list
+    let isDirectory = false
+    try {
+      await this.clientList(host, port, token, remotePath)
+      isDirectory = true
+    } catch {
+      isDirectory = false
+    }
+
+    let files = 0
+    const downloadTree = async (remote: string, localDir: string) => {
+      const entries = await this.clientList(host, port, token, remote)
+      for (const entry of entries) {
+        const localTarget = join(localDir, entry.name)
+        if (entry.isDirectory) {
+          await mkdir(localTarget, { recursive: true })
+          onProgress?.(`Folder ${entry.path}`)
+          await downloadTree(entry.path, localTarget)
+        } else {
+          onProgress?.(`Downloading ${entry.name}`)
+          await this.clientDownload(host, port, token, entry.path, localTarget)
+          files += 1
+        }
+      }
+    }
+
+    if (isDirectory) {
+      const destRoot = join(localDestFolder, remoteName)
+      await mkdir(destRoot, { recursive: true })
+      await downloadTree(remotePath, destRoot)
+      return {
+        ok: true,
+        message: `Transferred folder “${remoteName}” (${files} files)`,
+        detail: destRoot
+      }
+    }
+
+    const destFile = join(localDestFolder, remoteName)
+    await this.clientDownload(host, port, token, remotePath, destFile)
+    return { ok: true, message: `Downloaded ${remoteName}`, detail: destFile }
+  }
+
+  /** Upload a local file or folder tree into a remote destination folder. */
+  async transferLocalToRemote(
+    host: string,
+    port: number,
+    token: string,
+    localPath: string,
+    remoteDestFolder: string,
+    onProgress?: (message: string) => void
+  ): Promise<OperationResult> {
+    const { readdir } = await import('fs/promises')
+    const localName = basename(localPath)
+    const isDirectory = statSync(localPath).isDirectory()
+    let files = 0
+
+    const uploadTree = async (absolute: string, remoteFolder: string) => {
+      const entries = await readdir(absolute, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name === '.' || entry.name === '..') continue
+        const child = join(absolute, entry.name)
+        let childIsDir = entry.isDirectory()
+        try {
+          childIsDir = (await stat(child)).isDirectory()
+        } catch {
+          continue
+        }
+        if (childIsDir) {
+          onProgress?.(`Creating ${entry.name}`)
+          await this.clientMkdir(host, port, token, remoteFolder, entry.name)
+          const nextRemote =
+            !remoteFolder || remoteFolder === '.' ? entry.name : `${remoteFolder.replace(/\/+$/, '')}/${entry.name}`
+          await uploadTree(child, nextRemote)
+        } else {
+          onProgress?.(`Uploading ${entry.name}`)
+          await this.clientUpload(host, port, token, remoteFolder, child)
+          files += 1
+        }
+      }
+    }
+
+    if (isDirectory) {
+      await this.clientMkdir(host, port, token, remoteDestFolder || '.', localName)
+      const nextRemote =
+        !remoteDestFolder || remoteDestFolder === '.'
+          ? localName
+          : `${remoteDestFolder.replace(/\/+$/, '')}/${localName}`
+      await uploadTree(localPath, nextRemote)
+      return {
+        ok: true,
+        message: `Uploaded folder “${localName}” (${files} files)`,
+        detail: nextRemote
+      }
+    }
+
+    await this.clientUpload(host, port, token, remoteDestFolder || '.', localPath)
+    return { ok: true, message: `Uploaded ${localName}` }
+  }
 }

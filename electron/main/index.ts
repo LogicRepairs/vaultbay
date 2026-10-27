@@ -3,11 +3,13 @@ import { basename, join } from 'path'
 import type { NasSettings, PartitionPlan } from '../../src/shared/types'
 import { DiskService } from './services/disk'
 import { EncryptionService } from './services/encryption'
+import { LocalFsService } from './services/localfs'
 import { getPlatform } from './services/platform'
 import { ShareService } from './services/shares'
 import { DEFAULT_TRANSFER_PORT, TransferService } from './services/transfer'
 import { Store } from './store'
 import { registerUpdater } from './updater'
+import { homedir } from 'os'
 
 let mainWindow: BrowserWindow | null = null
 const store = new Store()
@@ -15,6 +17,7 @@ const disks = new DiskService(store)
 const encryption = new EncryptionService(store)
 const shares = new ShareService(store)
 const transfer = new TransferService()
+const localfs = new LocalFsService()
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -173,6 +176,63 @@ function registerIpc() {
   ipcMain.handle('vaultbay:openReleasesPage', () => {
     shell.openExternal('https://github.com/LogicRepairs/vaultbay/releases/latest')
   })
+
+  ipcMain.handle('vaultbay:getLocalRoots', () => localfs.getRoots())
+  ipcMain.handle('vaultbay:listLocal', (_e, path: string) => localfs.list(path))
+  ipcMain.handle('vaultbay:pickLocalFolder', async () => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow
+    const result = await dialog.showOpenDialog(win!, {
+      properties: ['openDirectory', 'createDirectory'],
+      title: 'Choose a folder on this laptop',
+      defaultPath: homedir()
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle(
+    'vaultbay:transferHostToLaptop',
+    async (
+      _e,
+      conn: { host: string; port: number; token: string },
+      remotePath: string,
+      localDestFolder: string
+    ) => {
+      const win = BrowserWindow.getFocusedWindow() || mainWindow
+      return transfer.transferRemoteToLocal(
+        conn.host,
+        conn.port,
+        conn.token,
+        remotePath,
+        localDestFolder,
+        (message) => {
+          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', message)
+        }
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'vaultbay:transferLaptopToHost',
+    async (
+      _e,
+      conn: { host: string; port: number; token: string },
+      localPath: string,
+      remoteDestFolder: string
+    ) => {
+      const win = BrowserWindow.getFocusedWindow() || mainWindow
+      return transfer.transferLocalToRemote(
+        conn.host,
+        conn.port,
+        conn.token,
+        localPath,
+        remoteDestFolder,
+        (message) => {
+          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', message)
+        }
+      )
+    }
+  )
 }
 
 app.whenReady().then(async () => {
