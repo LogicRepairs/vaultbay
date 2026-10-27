@@ -146,7 +146,8 @@ export function SettingsPage({
               </button>
               {update?.status === 'available' ? (
                 <button className="btn" disabled={busy} onClick={download}>
-                  <Download size={16} /> Download update
+                  <Download size={16} />{' '}
+                  {update.channel === 'portable' ? 'Get portable update' : 'Download update'}
                 </button>
               ) : null}
               {update?.status === 'downloaded' ? (
@@ -158,9 +159,18 @@ export function SettingsPage({
                 Open GitHub Releases
               </button>
             </div>
+            {update?.status === 'error' ? (
+              <div className="check-item">
+                <div className="n">!</div>
+                <div>
+                  <strong>Update check failed</strong>
+                  <div className="meta">{update.message}</div>
+                </div>
+              </div>
+            ) : null}
             <div className="meta">
-              Installed and portable builds both update from GitHub Releases. Portable apps can also just
-              download the newest portable file and replace the old one.
+              Full installers update in-app. Portable Windows builds should download the newest
+              `win-portable` EXE from GitHub Releases and replace the old file.
             </div>
           </div>
         </section>
