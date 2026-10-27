@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { basename, join } from 'path'
-import type { NasSettings, PartitionPlan } from '../../src/shared/types'
+import type { NasSettings, PartitionPlan, SavedSession, TransferProgress } from '../../src/shared/types'
 import { DiskService } from './services/disk'
 import { EncryptionService } from './services/encryption'
 import { LocalFsService } from './services/localfs'
@@ -205,8 +205,8 @@ function registerIpc() {
         conn.token,
         remotePath,
         localDestFolder,
-        (message) => {
-          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', message)
+        (progress: TransferProgress) => {
+          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', progress)
         }
       )
     }
@@ -227,11 +227,29 @@ function registerIpc() {
         conn.token,
         localPath,
         remoteDestFolder,
-        (message) => {
-          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', message)
+        (progress: TransferProgress) => {
+          if (win && !win.isDestroyed()) win.webContents.send('vaultbay:transfer-progress', progress)
         }
       )
     }
+  )
+
+  ipcMain.handle('vaultbay:getSession', () => store.getSession())
+  ipcMain.handle('vaultbay:updateSession', (_e, patch: Partial<SavedSession>) => store.updateSession(patch))
+  ipcMain.handle('vaultbay:saveClientPin', (_e, pin: string) => {
+    store.saveSecret('clientPin', pin)
+  })
+  ipcMain.handle('vaultbay:getClientPin', () => store.readSecret('clientPin'))
+  ipcMain.handle('vaultbay:saveHostPin', (_e, pin: string) => {
+    store.saveSecret('hostPin', pin)
+  })
+  ipcMain.handle('vaultbay:getHostPin', () => store.readSecret('hostPin'))
+  ipcMain.handle('vaultbay:getDataDir', () => store.getDataDir())
+  ipcMain.handle('vaultbay:getLocalFolderStats', (_e, path: string) => localfs.folderStats(path))
+  ipcMain.handle(
+    'vaultbay:getRemoteFolderStats',
+    (_e, conn: { host: string; port: number; token: string }, path: string) =>
+      transfer.clientFolderStats(conn.host, conn.port, conn.token, path)
   )
 }
 

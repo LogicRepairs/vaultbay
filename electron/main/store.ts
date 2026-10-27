@@ -1,14 +1,16 @@
-import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { safeStorage } from 'electron'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { dirname } from 'path'
 import { v4 as uuid } from 'uuid'
 import type {
   ClientDevice,
   DiskDrive,
   NasSettings,
   NetworkShare,
+  SavedSession,
   ShareUser
 } from '../../src/shared/types'
+import { getPersistentDataDir, getSecretsFilePath, getStateFilePath, readJsonFile } from './paths'
 
 export interface VaultState {
   settings: NasSettings
@@ -17,6 +19,7 @@ export interface VaultState {
   users: ShareUser[]
   clients: ClientDevice[]
   passwords: Record<string, string>
+  session: SavedSession
 }
 
 const defaultSettings = (): NasSettings => ({
@@ -30,6 +33,22 @@ const defaultSettings = (): NasSettings => ({
   allowGuest: false,
   discoveryEnabled: true,
   backupRetentionDays: 90
+})
+
+const defaultSession = (): SavedSession => ({
+  lastMode: 'choose',
+  rememberCredentials: true,
+  autoReconnect: true,
+  client: {
+    host: '',
+    port: 17890,
+    localPath: '',
+    lastConnectedAt: undefined
+  },
+  host: {
+    rootPath: '',
+    lastSharedAt: undefined
+  }
 })
 
 function emptyState(): VaultState {
@@ -47,7 +66,8 @@ function emptyState(): VaultState {
       }
     ],
     clients: [],
-    passwords: {}
+    passwords: {},
+    session: defaultSession()
   }
 }
 
@@ -56,17 +76,12 @@ function migrate(raw: Record<string, unknown>): VaultState {
   const settingsIn = (raw.settings ?? {}) as Partial<NasSettings> & { demoMode?: boolean }
   const hadDemo = Boolean(settingsIn.demoMode)
   const { demoMode: _removed, ...settingsRest } = settingsIn
+  const sessionIn = (raw.session ?? {}) as Partial<SavedSession>
 
-  // Drop seeded inventory. Drives are always probed live.
-  // If this machine previously ran demo mode, wipe shares/clients/passwords too.
   if (hadDemo) {
     return {
-      settings: { ...base.settings, ...settingsRest },
-      drives: [],
-      shares: [],
-      users: base.users,
-      clients: [],
-      passwords: {}
+      ...base,
+      settings: { ...base.settings, ...settingsRest }
     }
   }
 
@@ -78,25 +93,38 @@ function migrate(raw: Record<string, unknown>): VaultState {
       ? (raw.users as ShareUser[])
       : base.users,
     clients: Array.isArray(raw.clients) ? (raw.clients as ClientDevice[]) : [],
-    passwords: (raw.passwords as Record<string, string>) ?? {}
+    passwords: (raw.passwords as Record<string, string>) ?? {},
+    session: {
+      ...base.session,
+      ...sessionIn,
+      client: { ...base.session.client, ...(sessionIn.client || {}) },
+      host: { ...base.session.host, ...(sessionIn.host || {}) }
+    }
   }
 }
 
 export class Store {
   private path: string
+  private secretsPath: string
   private state: VaultState
+  private dataDir: string
 
   constructor() {
-    const dir = join(app.getPath('userData'), 'vaultbay')
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    this.path = join(dir, 'state.json')
+    this.dataDir = getPersistentDataDir()
+    this.path = getStateFilePath()
+    this.secretsPath = getSecretsFilePath()
+    if (!existsSync(dirname(this.path))) mkdirSync(dirname(this.path), { recursive: true })
     this.state = this.load()
+  }
+
+  getDataDir() {
+    return this.dataDir
   }
 
   private load(): VaultState {
     if (existsSync(this.path)) {
       try {
-        const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, unknown>
+        const parsed = readJsonFile<Record<string, unknown>>(this.path, {})
         const migrated = migrate(parsed)
         this.persist(migrated)
         return migrated
@@ -121,5 +149,55 @@ export class Store {
     mutator(this.state)
     this.persist()
     return this.state
+  }
+
+  getSession(): SavedSession {
+    return this.state.session
+  }
+
+  updateSession(patch: Partial<SavedSession>) {
+    this.update((s) => {
+      s.session = {
+        ...s.session,
+        ...patch,
+        client: { ...s.session.client, ...(patch.client || {}) },
+        host: { ...s.session.host, ...(patch.host || {}) }
+      }
+    })
+    return this.state.session
+  }
+
+  /** Encrypt & save PIN/passwords outside the main state file when possible */
+  saveSecret(key: string, value: string) {
+    const secrets = readJsonFile<Record<string, string>>(this.secretsPath, {})
+    if (safeStorage.isEncryptionAvailable()) {
+      secrets[key] = safeStorage.encryptString(value).toString('base64')
+      secrets[`${key}__enc`] = '1'
+    } else {
+      secrets[key] = Buffer.from(value, 'utf8').toString('base64')
+      secrets[`${key}__enc`] = '0'
+    }
+    writeFileSync(this.secretsPath, JSON.stringify(secrets, null, 2), 'utf8')
+  }
+
+  readSecret(key: string): string | null {
+    const secrets = readJsonFile<Record<string, string>>(this.secretsPath, {})
+    const raw = secrets[key]
+    if (!raw) return null
+    try {
+      if (secrets[`${key}__enc`] === '1' && safeStorage.isEncryptionAvailable()) {
+        return safeStorage.decryptString(Buffer.from(raw, 'base64'))
+      }
+      return Buffer.from(raw, 'base64').toString('utf8')
+    } catch {
+      return null
+    }
+  }
+
+  clearSecret(key: string) {
+    const secrets = readJsonFile<Record<string, string>>(this.secretsPath, {})
+    delete secrets[key]
+    delete secrets[`${key}__enc`]
+    writeFileSync(this.secretsPath, JSON.stringify(secrets, null, 2), 'utf8')
   }
 }

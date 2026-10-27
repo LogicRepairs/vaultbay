@@ -12,7 +12,14 @@ import { networkInterfaces } from 'os'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'path'
 import { pipeline } from 'stream/promises'
 import dgram from 'dgram'
-import type { DiscoveredHost, HostSession, OperationResult, RemoteEntry } from '../../../src/shared/types'
+import type {
+  DiscoveredHost,
+  FolderStats,
+  HostSession,
+  OperationResult,
+  RemoteEntry,
+  TransferProgress
+} from '../../../src/shared/types'
 
 export const DISCOVERY_PORT = 41234
 export const DEFAULT_TRANSFER_PORT = 17890
@@ -343,6 +350,29 @@ export class TransferService {
       return
     }
 
+    if (path === '/stats' && req.method === 'GET') {
+      if (!this.authed(req)) {
+        json(res, 401, { ok: false, message: 'Sign in with PIN first' })
+        return
+      }
+      const requested = url.searchParams.get('path') || '.'
+      const target = safeJoin(this.rootPath, requested)
+      if (!target) {
+        json(res, 400, { ok: false, message: 'Invalid path' })
+        return
+      }
+      try {
+        const stats = await this.folderStats(target)
+        json(res, 200, { ok: true, stats })
+      } catch (error) {
+        json(res, 500, {
+          ok: false,
+          message: error instanceof Error ? error.message : 'Stats failed'
+        })
+      }
+      return
+    }
+
     if (path === '/auth' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as { pin?: string }
       const incoming = hashPin(String(body.pin || ''))
@@ -580,6 +610,98 @@ export class TransferService {
     if (status >= 400 || !data.ok) throw new Error(String(data.message || 'Could not create folder'))
   }
 
+  private emitProgress(
+    onProgress: ((p: TransferProgress) => void) | undefined,
+    partial: TransferProgress
+  ) {
+    onProgress?.(partial)
+  }
+
+  private async folderStats(target: string): Promise<FolderStats> {
+    const entries = await readdir(target, { withFileTypes: true })
+    let listedBytes = 0
+    let fileCount = 0
+    let folderCount = 0
+    for (const entry of entries) {
+      if (entry.name === '.' || entry.name === '..') continue
+      try {
+        const s = await stat(join(target, entry.name))
+        if (s.isDirectory()) folderCount += 1
+        else {
+          fileCount += 1
+          listedBytes += s.size
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    let freeBytes: number | undefined
+    let totalBytes: number | undefined
+    let usedBytes: number | undefined
+    try {
+      const { statfs } = await import('fs/promises')
+      const fsStat = await statfs(target)
+      totalBytes = Number(fsStat.blocks) * Number(fsStat.bsize)
+      freeBytes = Number(fsStat.bavail) * Number(fsStat.bsize)
+      usedBytes = Math.max(totalBytes - freeBytes, 0)
+    } catch {
+      totalBytes = listedBytes
+      usedBytes = listedBytes
+    }
+
+    return {
+      path: target,
+      totalBytes: totalBytes ?? listedBytes,
+      freeBytes,
+      usedBytes,
+      fileCount,
+      folderCount,
+      listedBytes
+    }
+  }
+
+  async clientFolderStats(
+    host: string,
+    port: number,
+    token: string,
+    path: string
+  ): Promise<FolderStats> {
+    const { status, data } = await httpJson(
+      host,
+      port,
+      'GET',
+      `/stats?path=${encodeURIComponent(path || '.')}`,
+      { token }
+    )
+    if (status >= 400 || !data.ok || !data.stats) {
+      throw new Error(String(data.message || 'Could not read host storage stats'))
+    }
+    return data.stats as FolderStats
+  }
+
+  private async collectRemoteFiles(
+    host: string,
+    port: number,
+    token: string,
+    remotePath: string
+  ): Promise<{ path: string; name: string; size: number; isDirectory: boolean }[]> {
+    const out: { path: string; name: string; size: number; isDirectory: boolean }[] = []
+    const walk = async (remote: string) => {
+      const entries = await this.clientList(host, port, token, remote)
+      for (const entry of entries) {
+        if (entry.isDirectory) {
+          out.push({ path: entry.path, name: entry.name, size: 0, isDirectory: true })
+          await walk(entry.path)
+        } else {
+          out.push({ path: entry.path, name: entry.name, size: entry.size, isDirectory: false })
+        }
+      }
+    }
+    await walk(remotePath)
+    return out
+  }
+
   /** Download a remote file or whole folder tree into a local destination folder. */
   async transferRemoteToLocal(
     host: string,
@@ -587,13 +709,12 @@ export class TransferService {
     token: string,
     remotePath: string,
     localDestFolder: string,
-    onProgress?: (message: string) => void
+    onProgress?: (progress: TransferProgress) => void
   ): Promise<OperationResult> {
     const { mkdir } = await import('fs/promises')
     await mkdir(localDestFolder, { recursive: true })
 
     const remoteName = basename(remotePath.replace(/\\/g, '/')) || 'download'
-    // Detect whether remote path is a folder by listing parent / trying list
     let isDirectory = false
     try {
       await this.clientList(host, port, token, remotePath)
@@ -602,37 +723,102 @@ export class TransferService {
       isDirectory = false
     }
 
-    let files = 0
+    this.emitProgress(onProgress, {
+      message: 'Scanning host files…',
+      phase: 'scanning',
+      filesDone: 0,
+      filesTotal: 0,
+      bytesDone: 0,
+      bytesTotal: 0,
+      percent: 0
+    })
+
+    if (!isDirectory) {
+      // single file — size unknown until headers; treat as 1 file
+      const destFile = join(localDestFolder, remoteName)
+      this.emitProgress(onProgress, {
+        message: `Downloading ${remoteName}`,
+        phase: 'transferring',
+        filesDone: 0,
+        filesTotal: 1,
+        bytesDone: 0,
+        bytesTotal: 0,
+        percent: 0,
+        currentFile: remoteName
+      })
+      await this.clientDownload(host, port, token, remotePath, destFile)
+      this.emitProgress(onProgress, {
+        message: `Downloaded ${remoteName}`,
+        phase: 'done',
+        filesDone: 1,
+        filesTotal: 1,
+        bytesDone: 0,
+        bytesTotal: 0,
+        percent: 100,
+        currentFile: remoteName
+      })
+      return { ok: true, message: `Downloaded ${remoteName}`, detail: destFile }
+    }
+
+    const tree = await this.collectRemoteFiles(host, port, token, remotePath)
+    const files = tree.filter((t) => !t.isDirectory)
+    const bytesTotal = files.reduce((sum, f) => sum + (f.size || 0), 0)
+    let filesDone = 0
+    let bytesDone = 0
+
+    const destRoot = join(localDestFolder, remoteName)
+    await mkdir(destRoot, { recursive: true })
+
     const downloadTree = async (remote: string, localDir: string) => {
       const entries = await this.clientList(host, port, token, remote)
       for (const entry of entries) {
         const localTarget = join(localDir, entry.name)
         if (entry.isDirectory) {
           await mkdir(localTarget, { recursive: true })
-          onProgress?.(`Folder ${entry.path}`)
           await downloadTree(entry.path, localTarget)
         } else {
-          onProgress?.(`Downloading ${entry.name}`)
+          this.emitProgress(onProgress, {
+            message: `Downloading ${entry.name}`,
+            phase: 'transferring',
+            filesDone,
+            filesTotal: files.length,
+            bytesDone,
+            bytesTotal,
+            percent: bytesTotal ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100)) : 0,
+            currentFile: entry.name
+          })
           await this.clientDownload(host, port, token, entry.path, localTarget)
-          files += 1
+          filesDone += 1
+          bytesDone += entry.size || 0
+          this.emitProgress(onProgress, {
+            message: `Downloaded ${entry.name}`,
+            phase: 'transferring',
+            filesDone,
+            filesTotal: files.length,
+            bytesDone,
+            bytesTotal,
+            percent: bytesTotal ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100)) : Math.round((filesDone / Math.max(files.length, 1)) * 100),
+            currentFile: entry.name
+          })
         }
       }
     }
 
-    if (isDirectory) {
-      const destRoot = join(localDestFolder, remoteName)
-      await mkdir(destRoot, { recursive: true })
-      await downloadTree(remotePath, destRoot)
-      return {
-        ok: true,
-        message: `Transferred folder “${remoteName}” (${files} files)`,
-        detail: destRoot
-      }
+    await downloadTree(remotePath, destRoot)
+    this.emitProgress(onProgress, {
+      message: `Transferred folder “${remoteName}”`,
+      phase: 'done',
+      filesDone,
+      filesTotal: files.length,
+      bytesDone,
+      bytesTotal,
+      percent: 100
+    })
+    return {
+      ok: true,
+      message: `Transferred folder “${remoteName}” (${filesDone} files · ${bytesDone} bytes)`,
+      detail: destRoot
     }
-
-    const destFile = join(localDestFolder, remoteName)
-    await this.clientDownload(host, port, token, remotePath, destFile)
-    return { ok: true, message: `Downloaded ${remoteName}`, detail: destFile }
   }
 
   /** Upload a local file or folder tree into a remote destination folder. */
@@ -642,12 +828,76 @@ export class TransferService {
     token: string,
     localPath: string,
     remoteDestFolder: string,
-    onProgress?: (message: string) => void
+    onProgress?: (progress: TransferProgress) => void
   ): Promise<OperationResult> {
     const { readdir } = await import('fs/promises')
     const localName = basename(localPath)
     const isDirectory = statSync(localPath).isDirectory()
-    let files = 0
+
+    this.emitProgress(onProgress, {
+      message: 'Scanning laptop files…',
+      phase: 'scanning',
+      filesDone: 0,
+      filesTotal: 0,
+      bytesDone: 0,
+      bytesTotal: 0,
+      percent: 0
+    })
+
+    const collectLocal = async (absolute: string): Promise<{ path: string; size: number }[]> => {
+      const out: { path: string; size: number }[] = []
+      const entries = await readdir(absolute, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name === '.' || entry.name === '..') continue
+        const child = join(absolute, entry.name)
+        try {
+          const s = await stat(child)
+          if (s.isDirectory()) out.push(...(await collectLocal(child)))
+          else out.push({ path: child, size: s.size })
+        } catch {
+          // skip
+        }
+      }
+      return out
+    }
+
+    let filesDone = 0
+    let bytesDone = 0
+
+    if (!isDirectory) {
+      const size = statSync(localPath).size
+      this.emitProgress(onProgress, {
+        message: `Uploading ${localName}`,
+        phase: 'transferring',
+        filesDone: 0,
+        filesTotal: 1,
+        bytesDone: 0,
+        bytesTotal: size,
+        percent: 0,
+        currentFile: localName
+      })
+      await this.clientUpload(host, port, token, remoteDestFolder || '.', localPath)
+      this.emitProgress(onProgress, {
+        message: `Uploaded ${localName}`,
+        phase: 'done',
+        filesDone: 1,
+        filesTotal: 1,
+        bytesDone: size,
+        bytesTotal: size,
+        percent: 100,
+        currentFile: localName
+      })
+      return { ok: true, message: `Uploaded ${localName}` }
+    }
+
+    const fileList = await collectLocal(localPath)
+    const bytesTotal = fileList.reduce((sum, f) => sum + f.size, 0)
+
+    await this.clientMkdir(host, port, token, remoteDestFolder || '.', localName)
+    const nextRemote =
+      !remoteDestFolder || remoteDestFolder === '.'
+        ? localName
+        : `${remoteDestFolder.replace(/\/+$/, '')}/${localName}`
 
     const uploadTree = async (absolute: string, remoteFolder: string) => {
       const entries = await readdir(absolute, { withFileTypes: true })
@@ -655,40 +905,63 @@ export class TransferService {
         if (entry.name === '.' || entry.name === '..') continue
         const child = join(absolute, entry.name)
         let childIsDir = entry.isDirectory()
+        let size = 0
         try {
-          childIsDir = (await stat(child)).isDirectory()
+          const s = await stat(child)
+          childIsDir = s.isDirectory()
+          size = s.size
         } catch {
           continue
         }
         if (childIsDir) {
-          onProgress?.(`Creating ${entry.name}`)
           await this.clientMkdir(host, port, token, remoteFolder, entry.name)
-          const nextRemote =
+          const childRemote =
             !remoteFolder || remoteFolder === '.' ? entry.name : `${remoteFolder.replace(/\/+$/, '')}/${entry.name}`
-          await uploadTree(child, nextRemote)
+          await uploadTree(child, childRemote)
         } else {
-          onProgress?.(`Uploading ${entry.name}`)
+          this.emitProgress(onProgress, {
+            message: `Uploading ${entry.name}`,
+            phase: 'transferring',
+            filesDone,
+            filesTotal: fileList.length,
+            bytesDone,
+            bytesTotal,
+            percent: bytesTotal ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100)) : 0,
+            currentFile: entry.name
+          })
           await this.clientUpload(host, port, token, remoteFolder, child)
-          files += 1
+          filesDone += 1
+          bytesDone += size
+          this.emitProgress(onProgress, {
+            message: `Uploaded ${entry.name}`,
+            phase: 'transferring',
+            filesDone,
+            filesTotal: fileList.length,
+            bytesDone,
+            bytesTotal,
+            percent: bytesTotal
+              ? Math.min(99, Math.round((bytesDone / bytesTotal) * 100))
+              : Math.round((filesDone / Math.max(fileList.length, 1)) * 100),
+            currentFile: entry.name
+          })
         }
       }
     }
 
-    if (isDirectory) {
-      await this.clientMkdir(host, port, token, remoteDestFolder || '.', localName)
-      const nextRemote =
-        !remoteDestFolder || remoteDestFolder === '.'
-          ? localName
-          : `${remoteDestFolder.replace(/\/+$/, '')}/${localName}`
-      await uploadTree(localPath, nextRemote)
-      return {
-        ok: true,
-        message: `Uploaded folder “${localName}” (${files} files)`,
-        detail: nextRemote
-      }
+    await uploadTree(localPath, nextRemote)
+    this.emitProgress(onProgress, {
+      message: `Uploaded folder “${localName}”`,
+      phase: 'done',
+      filesDone,
+      filesTotal: fileList.length,
+      bytesDone,
+      bytesTotal,
+      percent: 100
+    })
+    return {
+      ok: true,
+      message: `Uploaded folder “${localName}” (${filesDone} files)`,
+      detail: nextRemote
     }
-
-    await this.clientUpload(host, port, token, remoteDestFolder || '.', localPath)
-    return { ok: true, message: `Uploaded ${localName}` }
   }
 }

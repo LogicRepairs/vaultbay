@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { UpdateStatus, VaultBayApi } from '../../src/shared/types'
+import type { TransferProgress, UpdateStatus, VaultBayApi } from '../../src/shared/types'
 
 const api: VaultBayApi = {
   getPlatform: () => ipcRenderer.invoke('vaultbay:getPlatform'),
@@ -53,10 +53,19 @@ const api: VaultBayApi = {
   transferLaptopToHost: (conn, localPath, remoteDestFolder) =>
     ipcRenderer.invoke('vaultbay:transferLaptopToHost', conn, localPath, remoteDestFolder),
   onTransferProgress: (handler) => {
-    const listener = (_event: IpcRendererEvent, message: string) => handler(message)
+    const listener = (_event: IpcRendererEvent, progress: TransferProgress) => handler(progress)
     ipcRenderer.on('vaultbay:transfer-progress', listener)
     return () => ipcRenderer.removeListener('vaultbay:transfer-progress', listener)
-  }
+  },
+  getSession: () => ipcRenderer.invoke('vaultbay:getSession'),
+  updateSession: (patch) => ipcRenderer.invoke('vaultbay:updateSession', patch),
+  saveClientPin: (pin) => ipcRenderer.invoke('vaultbay:saveClientPin', pin),
+  getClientPin: () => ipcRenderer.invoke('vaultbay:getClientPin'),
+  saveHostPin: (pin) => ipcRenderer.invoke('vaultbay:saveHostPin', pin),
+  getHostPin: () => ipcRenderer.invoke('vaultbay:getHostPin'),
+  getDataDir: () => ipcRenderer.invoke('vaultbay:getDataDir'),
+  getLocalFolderStats: (path) => ipcRenderer.invoke('vaultbay:getLocalFolderStats', path),
+  getRemoteFolderStats: (conn, path) => ipcRenderer.invoke('vaultbay:getRemoteFolderStats', conn, path)
 }
 
 contextBridge.exposeInMainWorld('vaultbay', api)

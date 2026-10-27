@@ -171,14 +171,51 @@ export interface LocalRoots {
   drives: { name: string; path: string }[]
 }
 
+export interface FolderStats {
+  path: string
+  totalBytes: number
+  freeBytes?: number
+  usedBytes?: number
+  fileCount: number
+  folderCount: number
+  listedBytes: number
+}
+
+export interface TransferProgress {
+  message: string
+  phase: 'scanning' | 'transferring' | 'done' | 'error'
+  filesDone: number
+  filesTotal: number
+  bytesDone: number
+  bytesTotal: number
+  percent: number
+  currentFile?: string
+}
+
+export type AppMode = 'choose' | 'host' | 'client' | 'advanced'
+
+export interface SavedSession {
+  lastMode: AppMode
+  rememberCredentials: boolean
+  autoReconnect: boolean
+  client: {
+    host: string
+    port: number
+    localPath: string
+    lastConnectedAt?: string
+  }
+  host: {
+    rootPath: string
+    lastSharedAt?: string
+  }
+}
+
 export interface ClientConnection {
   host: string
   port: number
   token: string
   name: string
 }
-
-export type AppMode = 'choose' | 'host' | 'client' | 'advanced'
 
 export interface VaultBayApi {
   getPlatform: () => Promise<Platform>
@@ -230,5 +267,14 @@ export interface VaultBayApi {
     localPath: string,
     remoteDestFolder: string
   ) => Promise<OperationResult>
-  onTransferProgress: (handler: (message: string) => void) => () => void
+  onTransferProgress: (handler: (progress: TransferProgress) => void) => () => void
+  getSession: () => Promise<SavedSession>
+  updateSession: (patch: Partial<SavedSession>) => Promise<SavedSession>
+  saveClientPin: (pin: string) => Promise<void>
+  getClientPin: () => Promise<string | null>
+  saveHostPin: (pin: string) => Promise<void>
+  getHostPin: () => Promise<string | null>
+  getDataDir: () => Promise<string>
+  getLocalFolderStats: (path: string) => Promise<FolderStats>
+  getRemoteFolderStats: (conn: ClientConnection, path: string) => Promise<FolderStats>
 }

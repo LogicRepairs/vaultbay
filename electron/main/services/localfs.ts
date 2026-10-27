@@ -2,7 +2,7 @@ import { existsSync, statSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { homedir } from 'os'
 import { basename, dirname, join, resolve, sep } from 'path'
-import type { LocalEntry, LocalRoots, OperationResult } from '../../../src/shared/types'
+import type { FolderStats, LocalEntry, LocalRoots, OperationResult } from '../../../src/shared/types'
 import { getPlatform, runCommand } from './platform'
 
 function toPosixRel(from: string, to: string): string {
@@ -138,5 +138,50 @@ export class LocalFsService {
     if (platform === 'darwin') await runCommand('open', ['-R', path])
     else if (platform === 'win32') await runCommand('explorer', ['/select,', path])
     else await runCommand('xdg-open', [dirname(path)])
+  }
+
+  async folderStats(path: string): Promise<FolderStats> {
+    const target = resolve(path || homedir())
+    const entries = await readdir(target, { withFileTypes: true })
+    let listedBytes = 0
+    let fileCount = 0
+    let folderCount = 0
+    for (const entry of entries) {
+      if (entry.name === '.' || entry.name === '..') continue
+      try {
+        const info = await stat(join(target, entry.name))
+        if (info.isDirectory()) folderCount += 1
+        else {
+          fileCount += 1
+          listedBytes += info.size
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    let freeBytes: number | undefined
+    let totalBytes: number | undefined
+    let usedBytes: number | undefined
+    try {
+      const { statfs } = await import('fs/promises')
+      const fsStat = await statfs(target)
+      totalBytes = Number(fsStat.blocks) * Number(fsStat.bsize)
+      freeBytes = Number(fsStat.bavail) * Number(fsStat.bsize)
+      usedBytes = Math.max(totalBytes - freeBytes, 0)
+    } catch {
+      totalBytes = listedBytes
+      usedBytes = listedBytes
+    }
+
+    return {
+      path: target,
+      totalBytes: totalBytes ?? listedBytes,
+      freeBytes,
+      usedBytes,
+      fileCount,
+      folderCount,
+      listedBytes
+    }
   }
 }

@@ -85,8 +85,25 @@ export default function App() {
         // still load whatever state exists
       }
       await refresh()
+      try {
+        const session = await api().getSession()
+        if (session.lastMode && session.lastMode !== 'choose') {
+          setMode(session.lastMode)
+        }
+      } catch {
+        // ignore
+      }
     })()
   }, [refresh])
+
+  const changeMode = useCallback(async (next: AppMode) => {
+    setMode(next)
+    try {
+      await api().updateSession({ lastMode: next })
+    } catch {
+      // ignore persistence failures
+    }
+  }, [])
 
   const onToast = useCallback((title: string, detail?: string) => {
     setToast({ title, detail })
@@ -150,19 +167,19 @@ export default function App() {
         </p>
 
         <div className="mode-cards">
-          <button className="mode-card" onClick={() => setMode('host')}>
+          <button className="mode-card" onClick={() => changeMode('host')}>
             <HardDrive size={28} />
             <strong>This PC has the drive</strong>
             <span>Shop / host — share an external backup drive for transfers</span>
           </button>
-          <button className="mode-card" onClick={() => setMode('client')}>
+          <button className="mode-card" onClick={() => changeMode('client')}>
             <MonitorSmartphone size={28} />
             <strong>Connect to the drive</strong>
             <span>Customer / portable — find the shop PC and copy files</span>
           </button>
         </div>
 
-        <button className="btn ghost" onClick={() => setMode('advanced')}>
+        <button className="btn ghost" onClick={() => changeMode('advanced')}>
           Advanced tools
         </button>
 
@@ -179,8 +196,8 @@ export default function App() {
           settings={settings}
           onRefresh={refresh}
           onToast={onToast}
-          onBack={() => setMode('choose')}
-          onAdvanced={() => setMode('advanced')}
+          onBack={() => changeMode('choose')}
+          onAdvanced={() => changeMode('advanced')}
         />
         <Toast message={toast} onDone={() => setToast(null)} />
       </>
@@ -192,8 +209,8 @@ export default function App() {
       <>
         <ClientSimple
           onToast={onToast}
-          onBack={() => setMode('choose')}
-          onAdvanced={() => setMode('advanced')}
+          onBack={() => changeMode('choose')}
+          onAdvanced={() => changeMode('advanced')}
         />
         <Toast message={toast} onDone={() => setToast(null)} />
       </>
@@ -233,7 +250,7 @@ export default function App() {
         </nav>
 
         <div className="nav-footer">
-          <button className="btn secondary" style={{ width: '100%' }} onClick={() => setMode('choose')}>
+          <button className="btn secondary" style={{ width: '100%' }} onClick={() => changeMode('choose')}>
             Simple mode
           </button>
           <div style={{ marginTop: 8 }}>{settings?.serverName ?? 'VaultBay'}</div>

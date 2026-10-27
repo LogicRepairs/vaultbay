@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { HardDrive, Radio, StopCircle } from 'lucide-react'
+import { ErrorBanner } from '../components/ErrorBanner'
 import { api } from '../lib/api'
 import { formatBytes } from '../lib/format'
 import type { DiskDrive, HostSession, NasSettings } from '../shared/types'
@@ -39,16 +40,31 @@ export function HostSimple({
   const [pin, setPin] = useState('1234')
   const [session, setSession] = useState<HostSession | null>(null)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<{ title: string; detail?: string } | null>(null)
+  const [dataDir, setDataDir] = useState('')
 
   useEffect(() => {
-    api()
-      .getHostSession()
-      .then((s) => {
-        setSession(s)
-        if (s?.rootPath) setRootPath(s.rootPath)
-        if (s?.pin) setPin(s.pin)
-      })
-      .catch(() => undefined)
+    ;(async () => {
+      try {
+        const [live, saved, savedPin, dir] = await Promise.all([
+          api().getHostSession(),
+          api().getSession(),
+          api().getHostPin(),
+          api().getDataDir()
+        ])
+        setDataDir(dir)
+        if (live) {
+          setSession(live)
+          if (live.rootPath) setRootPath(live.rootPath)
+          if (live.pin) setPin(live.pin)
+        } else {
+          if (saved.host.rootPath) setRootPath(saved.host.rootPath)
+          if (savedPin) setPin(savedPin)
+        }
+      } catch {
+        // ignore
+      }
+    })()
   }, [])
 
   useEffect(() => {
@@ -57,6 +73,7 @@ export function HostSimple({
 
   async function start() {
     setBusy(true)
+    setError(null)
     try {
       await onRefresh()
       const next = await api().startHostShare({
@@ -65,9 +82,16 @@ export function HostSimple({
         pin
       })
       setSession(next)
+      await api().saveHostPin(pin)
+      await api().updateSession({
+        host: { rootPath, lastSharedAt: new Date().toISOString() }
+      })
       onToast('Sharing started', next.shareHint)
     } catch (e) {
-      onToast('Could not start sharing', e instanceof Error ? e.message : 'Error')
+      setError({
+        title: 'Could not start sharing',
+        detail: e instanceof Error ? e.message : 'Check the drive is mounted and try again'
+      })
     } finally {
       setBusy(false)
     }
@@ -104,9 +128,12 @@ export function HostSimple({
           Plug in the external drive, pick it below, set a short PIN, then start sharing. On the customer PC,
           open the portable VaultBay app and choose <strong>Connect</strong>.
         </p>
+        {dataDir ? <div className="meta">Saved settings folder: {dataDir}</div> : null}
       </section>
 
-      <div className="grid two">
+      {error ? <ErrorBanner title={error.title} detail={error.detail} onClose={() => setError(null)} /> : null}
+
+      <div className="grid two fade-in">
         <section className="panel">
           <div className="panel-head">
             <h2>1. Choose drive folder</h2>
