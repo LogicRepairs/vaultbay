@@ -3,6 +3,7 @@ import {
   HardDrive,
   LayoutDashboard,
   Link2,
+  MonitorSmartphone,
   Settings as SettingsIcon,
   Share2,
   Users
@@ -10,12 +11,15 @@ import {
 import { Toast, type ToastMessage } from './components/Toast'
 import { api } from './lib/api'
 import { Access } from './pages/Access'
+import { ClientSimple } from './pages/ClientSimple'
 import { Dashboard } from './pages/Dashboard'
 import { Drives } from './pages/Drives'
+import { HostSimple } from './pages/HostSimple'
 import { SettingsPage } from './pages/Settings'
 import { Shares } from './pages/Shares'
 import { UsersPage } from './pages/Users'
 import type {
+  AppMode,
   CapacityStats,
   ClientDevice,
   DiskDrive,
@@ -37,6 +41,7 @@ const NAV: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
 ]
 
 export default function App() {
+  const [mode, setMode] = useState<AppMode>('choose')
   const [tab, setTab] = useState<Tab>('dashboard')
   const [platform, setPlatform] = useState<Platform>('unknown')
   const [settings, setSettings] = useState<NasSettings | null>(null)
@@ -117,10 +122,83 @@ export default function App() {
       case 'settings':
         return {
           title: 'Server settings',
-          subtitle: 'Identity, discovery, and encryption preferences.'
+          subtitle: 'Identity, discovery, updates, and encryption preferences.'
         }
     }
   }, [tab])
+
+  if (mode === 'choose') {
+    return (
+      <div className="mode-screen">
+        <div className="mode-brand">
+          <div className="brand-mark" aria-hidden>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" stroke="white" strokeWidth="1.6" />
+              <path d="M12 12v9M12 12 4 7.5M12 12l8-4.5" stroke="white" strokeWidth="1.6" />
+            </svg>
+          </div>
+          <div>
+            <strong>VaultBay</strong>
+            <span>Simple drive transfer</span>
+          </div>
+        </div>
+
+        <h1>What is this computer?</h1>
+        <p className="mode-copy">
+          One app, two roles. Install on the shop PC that has the backup drive, and run the portable app on the
+          customer PC to move files.
+        </p>
+
+        <div className="mode-cards">
+          <button className="mode-card" onClick={() => setMode('host')}>
+            <HardDrive size={28} />
+            <strong>This PC has the drive</strong>
+            <span>Shop / host — share an external backup drive for transfers</span>
+          </button>
+          <button className="mode-card" onClick={() => setMode('client')}>
+            <MonitorSmartphone size={28} />
+            <strong>Connect to the drive</strong>
+            <span>Customer / portable — find the shop PC and copy files</span>
+          </button>
+        </div>
+
+        <button className="btn ghost" onClick={() => setMode('advanced')}>
+          Advanced tools
+        </button>
+
+        <Toast message={toast} onDone={() => setToast(null)} />
+      </div>
+    )
+  }
+
+  if (mode === 'host') {
+    return (
+      <>
+        <HostSimple
+          drives={drives}
+          settings={settings}
+          onRefresh={refresh}
+          onToast={onToast}
+          onBack={() => setMode('choose')}
+          onAdvanced={() => setMode('advanced')}
+        />
+        <Toast message={toast} onDone={() => setToast(null)} />
+      </>
+    )
+  }
+
+  if (mode === 'client') {
+    return (
+      <>
+        <ClientSimple
+          onToast={onToast}
+          onBack={() => setMode('choose')}
+          onAdvanced={() => setMode('advanced')}
+        />
+        <Toast message={toast} onDone={() => setToast(null)} />
+      </>
+    )
+  }
 
   return (
     <div className="app-shell">
@@ -128,17 +206,13 @@ export default function App() {
         <div className="brand">
           <div className="brand-mark" aria-hidden>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z"
-                stroke="white"
-                strokeWidth="1.6"
-              />
+              <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" stroke="white" strokeWidth="1.6" />
               <path d="M12 12v9M12 12 4 7.5M12 12l8-4.5" stroke="white" strokeWidth="1.6" />
             </svg>
           </div>
           <div className="brand-copy">
             <strong>VaultBay</strong>
-            <span>NAS control</span>
+            <span>Advanced</span>
           </div>
         </div>
 
@@ -159,8 +233,10 @@ export default function App() {
         </nav>
 
         <div className="nav-footer">
-          Scanning real attached drives only.
-          <div style={{ marginTop: 6 }}>{settings?.serverName ?? 'VaultBay'}</div>
+          <button className="btn secondary" style={{ width: '100%' }} onClick={() => setMode('choose')}>
+            Simple mode
+          </button>
+          <div style={{ marginTop: 8 }}>{settings?.serverName ?? 'VaultBay'}</div>
         </div>
       </aside>
 

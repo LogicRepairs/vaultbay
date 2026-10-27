@@ -132,6 +132,14 @@ export function SettingsPage({
                 </div>
               ) : null}
             </div>
+            <div className="meta">
+              Channel:{' '}
+              {update?.channel === 'portable'
+                ? 'Portable build'
+                : update?.channel === 'installed'
+                  ? 'Installed build'
+                  : 'Development'}
+            </div>
             <div className="actions">
               <button className="btn secondary" disabled={busy} onClick={checkUpdates}>
                 <RefreshCw size={16} /> Check for updates
@@ -146,6 +154,13 @@ export function SettingsPage({
                   <RotateCcw size={16} /> Restart & install
                 </button>
               ) : null}
+              <button className="btn ghost" onClick={() => api().openReleasesPage()}>
+                Open GitHub Releases
+              </button>
+            </div>
+            <div className="meta">
+              Installed and portable builds both update from GitHub Releases. Portable apps can also just
+              download the newest portable file and replace the old one.
             </div>
           </div>
         </section>

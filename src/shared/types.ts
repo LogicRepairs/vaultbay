@@ -128,7 +128,43 @@ export interface UpdateStatus {
   availableVersion?: string
   percent?: number
   message: string
+  channel?: 'installed' | 'portable' | 'dev'
 }
+
+export interface HostSession {
+  running: boolean
+  name: string
+  rootPath: string
+  port: number
+  pin: string
+  addresses: string[]
+  shareHint: string
+}
+
+export interface DiscoveredHost {
+  id: string
+  name: string
+  host: string
+  port: number
+  lastSeen: number
+}
+
+export interface RemoteEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+  size: number
+  mtime: string
+}
+
+export interface ClientConnection {
+  host: string
+  port: number
+  token: string
+  name: string
+}
+
+export type AppMode = 'choose' | 'host' | 'client' | 'advanced'
 
 export interface VaultBayApi {
   getPlatform: () => Promise<Platform>
@@ -156,4 +192,15 @@ export interface VaultBayApi {
   downloadUpdate: () => Promise<UpdateStatus>
   installUpdate: () => Promise<UpdateStatus>
   onUpdateStatus: (handler: (status: UpdateStatus) => void) => () => void
+  startHostShare: (input: { name: string; rootPath: string; pin: string }) => Promise<HostSession>
+  stopHostShare: () => Promise<OperationResult>
+  getHostSession: () => Promise<HostSession | null>
+  startDiscovery: () => Promise<void>
+  stopDiscovery: () => Promise<void>
+  listDiscoveredHosts: () => Promise<DiscoveredHost[]>
+  connectToHost: (input: { host: string; port?: number; pin: string }) => Promise<ClientConnection>
+  listRemote: (conn: ClientConnection, path: string) => Promise<RemoteEntry[]>
+  downloadRemote: (conn: ClientConnection, remotePath: string) => Promise<OperationResult>
+  uploadToRemote: (conn: ClientConnection, remoteFolder: string) => Promise<OperationResult>
+  openReleasesPage: () => Promise<void>
 }

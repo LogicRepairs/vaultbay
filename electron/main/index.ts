@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { basename, join } from 'path'
 import type { NasSettings, PartitionPlan } from '../../src/shared/types'
 import { DiskService } from './services/disk'
 import { EncryptionService } from './services/encryption'
 import { getPlatform } from './services/platform'
 import { ShareService } from './services/shares'
+import { DEFAULT_TRANSFER_PORT, TransferService } from './services/transfer'
 import { Store } from './store'
 import { registerUpdater } from './updater'
 
@@ -13,13 +14,14 @@ const store = new Store()
 const disks = new DiskService(store)
 const encryption = new EncryptionService(store)
 const shares = new ShareService(store)
+const transfer = new TransferService()
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 1024,
-    minHeight: 720,
+    width: 1180,
+    height: 800,
+    minWidth: 960,
+    minHeight: 680,
     title: 'VaultBay',
     backgroundColor: '#e8eef2',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -103,6 +105,74 @@ function registerIpc() {
   ipcMain.handle('vaultbay:mapDrive', (_e, shareId: string, mountPoint?: string) =>
     shares.mapDrive(shareId, mountPoint)
   )
+
+  ipcMain.handle('vaultbay:startHostShare', async (_e, input: { name: string; rootPath: string; pin: string }) => {
+    const settings = store.get().settings
+    return transfer.startHost({
+      name: input.name || settings.serverName,
+      rootPath: input.rootPath,
+      pin: input.pin
+    })
+  })
+  ipcMain.handle('vaultbay:stopHostShare', () => transfer.stopHost())
+  ipcMain.handle('vaultbay:getHostSession', () => transfer.getSession())
+  ipcMain.handle('vaultbay:startDiscovery', () => {
+    transfer.startDiscovery()
+  })
+  ipcMain.handle('vaultbay:stopDiscovery', () => {
+    transfer.stopDiscovery()
+  })
+  ipcMain.handle('vaultbay:listDiscoveredHosts', () => transfer.listDiscovered())
+  ipcMain.handle(
+    'vaultbay:connectToHost',
+    async (_e, input: { host: string; port?: number; pin: string }) => {
+      const port = input.port || DEFAULT_TRANSFER_PORT
+      const auth = await transfer.clientAuth(input.host, port, input.pin)
+      return { host: input.host, port, token: auth.token, name: auth.name }
+    }
+  )
+  ipcMain.handle(
+    'vaultbay:listRemote',
+    (_e, conn: { host: string; port: number; token: string }, path: string) =>
+      transfer.clientList(conn.host, conn.port, conn.token, path)
+  )
+  ipcMain.handle(
+    'vaultbay:downloadRemote',
+    async (_e, conn: { host: string; port: number; token: string }, remotePath: string) => {
+      const win = BrowserWindow.getFocusedWindow() || mainWindow
+      const result = await dialog.showSaveDialog(win!, {
+        defaultPath: basename(remotePath),
+        title: 'Save file from VaultBay'
+      })
+      if (result.canceled || !result.filePath) {
+        return { ok: false, message: 'Download cancelled' }
+      }
+      return transfer.clientDownload(conn.host, conn.port, conn.token, remotePath, result.filePath)
+    }
+  )
+  ipcMain.handle(
+    'vaultbay:uploadToRemote',
+    async (_e, conn: { host: string; port: number; token: string }, remoteFolder: string) => {
+      const win = BrowserWindow.getFocusedWindow() || mainWindow
+      const result = await dialog.showOpenDialog(win!, {
+        properties: ['openFile', 'multiSelections'],
+        title: 'Upload files to VaultBay host'
+      })
+      if (result.canceled || result.filePaths.length === 0) {
+        return { ok: false, message: 'Upload cancelled' }
+      }
+      for (const filePath of result.filePaths) {
+        await transfer.clientUpload(conn.host, conn.port, conn.token, remoteFolder, filePath)
+      }
+      return {
+        ok: true,
+        message: `Uploaded ${result.filePaths.length} file${result.filePaths.length === 1 ? '' : 's'}`
+      }
+    }
+  )
+  ipcMain.handle('vaultbay:openReleasesPage', () => {
+    shell.openExternal('https://github.com/LogicRepairs/vaultbay/releases/latest')
+  })
 }
 
 app.whenReady().then(async () => {
@@ -116,5 +186,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  transfer.stopHost().catch(() => undefined)
+  transfer.stopDiscovery()
   if (process.platform !== 'darwin') app.quit()
 })
