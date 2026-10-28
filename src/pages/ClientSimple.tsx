@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeftRight,
   ChevronUp,
@@ -11,6 +11,7 @@ import {
   Upload
 } from 'lucide-react'
 import { ErrorBanner } from '../components/ErrorBanner'
+import { Modal } from '../components/Modal'
 import { StorageMeter } from '../components/StorageMeter'
 import { api } from '../lib/api'
 import { formatBytes } from '../lib/format'
@@ -58,6 +59,97 @@ export function ClientSimple({
   const [progress, setProgress] = useState<TransferProgress | null>(null)
   const [error, setError] = useState<{ title: string; detail?: string } | null>(null)
   const [booting, setBooting] = useState(true)
+  const [pinPrompt, setPinPrompt] = useState<DiscoveredHost | null>(null)
+  const [pinDraft, setPinDraft] = useState('')
+  const [statusNote, setStatusNote] = useState('Looking for VaultBay hosts on your Wi‑Fi…')
+
+  const connRef = useRef<ClientConnection | null>(null)
+  const busyRef = useRef(false)
+  const pinRef = useRef('')
+  const rememberRef = useRef(true)
+  const autoReconnectRef = useRef(true)
+  const localPathRef = useRef('')
+  const preferredHostRef = useRef('')
+  const attemptedRef = useRef<Set<string>>(new Set())
+  const promptedRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    connRef.current = conn
+  }, [conn])
+  useEffect(() => {
+    busyRef.current = busy
+  }, [busy])
+  useEffect(() => {
+    pinRef.current = pin
+  }, [pin])
+  useEffect(() => {
+    rememberRef.current = remember
+  }, [remember])
+  useEffect(() => {
+    autoReconnectRef.current = autoReconnect
+  }, [autoReconnect])
+  useEffect(() => {
+    localPathRef.current = localPath
+  }, [localPath])
+
+  const finishConnect = useCallback(
+    async (target: string, port: number, nextPin: string, label?: string) => {
+      const next = await api().connectToHost({ host: target, port, pin: nextPin })
+      setConn(next)
+      setHost(target)
+      preferredHostRef.current = target
+      setRemotePath('.')
+      setRemoteSelected(null)
+      setPin(nextPin)
+      setPinPrompt(null)
+      const list = await api().listRemote(next, '.')
+      setRemoteEntries(list)
+      await api().updateSession({
+        rememberCredentials: rememberRef.current,
+        autoReconnect: autoReconnectRef.current,
+        client: {
+          host: target,
+          port,
+          localPath: localPathRef.current,
+          lastConnectedAt: new Date().toISOString()
+        }
+      })
+      if (rememberRef.current && nextPin) await api().saveClientPin(nextPin)
+      onToast(`Connected to ${label || next.name}`)
+      setStatusNote(`Connected to ${label || next.name}`)
+      return next
+    },
+    [onToast]
+  )
+
+  const tryAutoConnect = useCallback(
+    async (target: DiscoveredHost, nextPin: string) => {
+      if (connRef.current || busyRef.current) return
+      const key = `${target.host}:${target.port}`
+      if (attemptedRef.current.has(key)) return
+      attemptedRef.current.add(key)
+      busyRef.current = true
+      setBusy(true)
+      setError(null)
+      setStatusNote(`Connecting to ${target.name}…`)
+      try {
+        await finishConnect(target.host, target.port, nextPin, target.name)
+      } catch (e) {
+        attemptedRef.current.delete(key)
+        setError({
+          title: `Could not connect to ${target.name}`,
+          detail: e instanceof Error ? e.message : 'Check the PIN and try again'
+        })
+        setStatusNote(`Waiting for PIN to join ${target.name}`)
+        setPinPrompt(target)
+        setPinDraft('')
+      } finally {
+        busyRef.current = false
+        setBusy(false)
+      }
+    },
+    [finishConnect]
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -72,36 +164,29 @@ export function ClientSimple({
         ])
         if (cancelled) return
         setRemember(session.rememberCredentials)
-        setAutoReconnect(session.autoReconnect)
+        setAutoReconnect(session.autoReconnect !== false)
+        autoReconnectRef.current = session.autoReconnect !== false
         setDataDir(dir)
         setRoots(rootsResult)
-        if (session.client.host) setHost(session.client.host)
-        if (savedPin) setPin(savedPin)
+        if (session.client.host) {
+          setHost(session.client.host)
+          preferredHostRef.current = session.client.host
+        }
+        if (savedPin) {
+          setPin(savedPin)
+          pinRef.current = savedPin
+        }
         const startLocal =
           session.client.localPath ||
           rootsResult.favorites.find((f) => f.name === 'Downloads')?.path ||
           rootsResult.home
         setLocalPath(startLocal)
-
-        if (session.autoReconnect && session.client.host && savedPin) {
-          try {
-            const next = await api().connectToHost({
-              host: session.client.host,
-              port: session.client.port,
-              pin: savedPin
-            })
-            if (cancelled) return
-            setConn(next)
-            const list = await api().listRemote(next, '.')
-            setRemoteEntries(list)
-            onToast('Reconnected', next.name)
-          } catch (e) {
-            setError({
-              title: 'Could not auto-reconnect',
-              detail: e instanceof Error ? e.message : 'Enter PIN and connect again'
-            })
-          }
-        }
+        localPathRef.current = startLocal
+        setStatusNote(
+          savedPin
+            ? 'Saved PIN loaded — will auto-connect when a VaultBay host appears'
+            : 'When a host appears, you’ll be asked for the PIN (then it’s remembered)'
+        )
       } catch (e) {
         setError({
           title: 'Could not load saved settings',
@@ -117,7 +202,7 @@ export function ClientSimple({
         .listDiscoveredHosts()
         .then(setHosts)
         .catch(() => undefined)
-    }, 1500)
+    }, 1200)
 
     const stopProgress = api().onTransferProgress(setProgress)
 
@@ -127,7 +212,34 @@ export function ClientSimple({
       stopProgress()
       api().stopDiscovery().catch(() => undefined)
     }
-  }, [onToast])
+  }, [])
+
+  // When a host is discovered, auto-connect with saved PIN or ask for PIN once.
+  useEffect(() => {
+    if (booting || conn || !autoReconnect || hosts.length === 0 || busy) return
+
+    const preferred = preferredHostRef.current
+    const target =
+      (preferred && hosts.find((h) => h.host === preferred)) ||
+      hosts[0]
+
+    if (!target) return
+    const key = `${target.host}:${target.port}`
+    setHost(target.host)
+
+    const knownPin = pinRef.current.trim()
+    if (knownPin.length >= 4) {
+      void tryAutoConnect(target, knownPin)
+      return
+    }
+
+    if (!promptedRef.current.has(key) && !pinPrompt) {
+      promptedRef.current.add(key)
+      setPinPrompt(target)
+      setPinDraft('')
+      setStatusNote(`VaultBay host found: ${target.name} — enter PIN to connect`)
+    }
+  }, [hosts, conn, autoReconnect, busy, booting, pinPrompt, tryAutoConnect])
 
   useEffect(() => {
     if (!localPath) return
@@ -167,46 +279,41 @@ export function ClientSimple({
     [remotePath]
   )
 
-  async function persistClient(nextHost: string, nextLocal: string, nextPin: string) {
-    await api().updateSession({
-      rememberCredentials: remember,
-      autoReconnect,
-      client: {
-        host: nextHost,
-        port: 17890,
-        localPath: nextLocal,
-        lastConnectedAt: new Date().toISOString()
-      }
-    })
-    if (remember && nextPin) await api().saveClientPin(nextPin)
-  }
-
-  async function connect(selectedHost?: string) {
+  async function connect(selectedHost?: string, pinOverride?: string) {
     const target = selectedHost || host
-    if (!target || pin.length < 4) {
+    const nextPin = (pinOverride ?? pin).trim()
+    if (!target || nextPin.length < 4) {
       setError({ title: 'Host and PIN required', detail: 'PIN must be at least 4 characters' })
       return
     }
     setBusy(true)
     setError(null)
+    setStatusNote(`Connecting to ${target}…`)
     try {
-      const next = await api().connectToHost({ host: target, pin })
-      setConn(next)
-      setHost(target)
-      setRemotePath('.')
-      setRemoteSelected(null)
-      const list = await api().listRemote(next, '.')
-      setRemoteEntries(list)
-      await persistClient(target, localPath, pin)
-      onToast(`Connected to ${next.name}`)
+      const match = hosts.find((h) => h.host === target)
+      await finishConnect(target, match?.port || 17890, nextPin, match?.name)
     } catch (e) {
       setError({
         title: 'Connection failed',
         detail: e instanceof Error ? e.message : 'Check Wi‑Fi, host sharing, and PIN'
       })
+      setStatusNote('Connection failed — check PIN and try again')
     } finally {
       setBusy(false)
     }
+  }
+
+  async function submitPinPrompt() {
+    if (!pinPrompt) return
+    const nextPin = pinDraft.trim()
+    if (nextPin.length < 4) {
+      setError({ title: 'PIN too short', detail: 'Enter the PIN shown on the shop/host PC' })
+      return
+    }
+    setPin(nextPin)
+    pinRef.current = nextPin
+    setPinPrompt(null)
+    await tryAutoConnect(pinPrompt, nextPin)
   }
 
   async function openRemote(nextPath: string) {
@@ -348,8 +455,12 @@ export function ClientSimple({
           </div>
           <h1>Connect to the shop drive</h1>
           <p>
-            Settings and PIN are saved under your Downloads/VaultBay-Data folder so updates don’t wipe them.
+            When a VaultBay host appears on Wi‑Fi, this app connects automatically. If the PIN was saved
+            before, it uses it. Otherwise it asks once, then remembers it.
           </p>
+          <div className="meta" style={{ marginTop: 8 }}>
+            {statusNote}
+          </div>
           {dataDir ? <div className="meta">Data folder: {dataDir}</div> : null}
         </section>
 
@@ -361,7 +472,7 @@ export function ClientSimple({
           <section className="panel">
             <div className="panel-head">
               <h2>Nearby VaultBay hosts</h2>
-              <span>Auto-scanning…</span>
+              <span>{hosts.length ? `${hosts.length} found` : 'Scanning…'}</span>
             </div>
             <div className="panel-body" style={{ display: 'grid', gap: 8 }}>
               {hosts.length === 0 ? (
@@ -373,14 +484,20 @@ export function ClientSimple({
                     className="choice-row"
                     onClick={() => {
                       setHost(h.host)
-                      connect(h.host)
+                      preferredHostRef.current = h.host
+                      if (pin.trim().length >= 4) connect(h.host)
+                      else {
+                        setPinPrompt(h)
+                        setPinDraft('')
+                      }
                     }}
-                    disabled={busy || pin.length < 4}
+                    disabled={busy}
                   >
                     <div>
                       <strong>{h.name}</strong>
                       <div className="meta">
                         {h.host}:{h.port}
+                        {preferredHostRef.current === h.host ? ' · preferred' : ''}
                       </div>
                     </div>
                   </button>
@@ -392,7 +509,7 @@ export function ClientSimple({
           <section className="panel">
             <div className="panel-head">
               <h2>Connect</h2>
-              <span>Saved after first success</span>
+              <span>PIN remembered after first success</span>
             </div>
             <div className="panel-body form-grid">
               <label className="field">
@@ -401,26 +518,86 @@ export function ClientSimple({
               </label>
               <label className="field">
                 PIN
-                <input value={pin} onChange={(e) => setPin(e.target.value)} placeholder="1234" />
+                <input
+                  value={pin}
+                  onChange={(e) => {
+                    setPin(e.target.value)
+                    pinRef.current = e.target.value
+                  }}
+                  placeholder="1234"
+                />
               </label>
               <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={remember}
+                  onChange={(e) => {
+                    setRemember(e.target.checked)
+                    rememberRef.current = e.target.checked
+                  }}
+                />
                 Remember host & PIN after updates
               </label>
               <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <input
                   type="checkbox"
                   checked={autoReconnect}
-                  onChange={(e) => setAutoReconnect(e.target.checked)}
+                  onChange={(e) => {
+                    setAutoReconnect(e.target.checked)
+                    autoReconnectRef.current = e.target.checked
+                  }}
                 />
-                Auto-reconnect on launch
+                Auto-connect when a host is found
               </label>
               <button className="btn" disabled={busy || !host || pin.length < 4} onClick={() => connect()}>
-                Connect
+                Connect now
               </button>
             </div>
           </section>
         </div>
+
+        {pinPrompt ? (
+          <Modal
+            title={`Connect to ${pinPrompt.name}`}
+            hint={`Host found at ${pinPrompt.host}. Enter the PIN from the shop/host PC. It will be remembered for next time.`}
+            onClose={() => setPinPrompt(null)}
+            actions={
+              <>
+                <button className="btn secondary" onClick={() => setPinPrompt(null)}>
+                  Not now
+                </button>
+                <button className="btn" disabled={busy || pinDraft.trim().length < 4} onClick={submitPinPrompt}>
+                  Connect
+                </button>
+              </>
+            }
+          >
+            <label className="field">
+              PIN
+              <input
+                type="password"
+                value={pinDraft}
+                onChange={(e) => setPinDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitPinPrompt()
+                }}
+                placeholder="Shop PIN"
+                autoFocus
+              />
+            </label>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => {
+                  setRemember(e.target.checked)
+                  rememberRef.current = e.target.checked
+                }}
+              />
+              Remember this PIN
+            </label>
+          </Modal>
+        ) : null}
       </div>
     )
   }
