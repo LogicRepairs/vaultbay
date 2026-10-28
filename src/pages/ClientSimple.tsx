@@ -64,21 +64,21 @@ export function ClientSimple({
   const [statusNote, setStatusNote] = useState('Looking for VaultBay hosts on your Wi‑Fi…')
 
   const connRef = useRef<ClientConnection | null>(null)
-  const busyRef = useRef(false)
+  const connectingRef = useRef(false)
   const pinRef = useRef('')
   const rememberRef = useRef(true)
   const autoReconnectRef = useRef(true)
   const localPathRef = useRef('')
   const preferredHostRef = useRef('')
-  const attemptedRef = useRef<Set<string>>(new Set())
-  const promptedRef = useRef<Set<string>>(new Set())
+  /** host:port keys we already handled (auto-connect or PIN prompt shown) */
+  const handledHostRef = useRef<Set<string>>(new Set())
+  /** host:port -> PIN that already failed, so we don't retry the same bad PIN */
+  const failedPinRef = useRef<Map<string, string>>(new Map())
+  const pinPromptOpenRef = useRef(false)
 
   useEffect(() => {
     connRef.current = conn
   }, [conn])
-  useEffect(() => {
-    busyRef.current = busy
-  }, [busy])
   useEffect(() => {
     pinRef.current = pin
   }, [pin])
@@ -91,17 +91,24 @@ export function ClientSimple({
   useEffect(() => {
     localPathRef.current = localPath
   }, [localPath])
+  useEffect(() => {
+    pinPromptOpenRef.current = Boolean(pinPrompt)
+  }, [pinPrompt])
 
   const finishConnect = useCallback(
     async (target: string, port: number, nextPin: string, label?: string) => {
       const next = await api().connectToHost({ host: target, port, pin: nextPin })
       setConn(next)
+      connRef.current = next
       setHost(target)
       preferredHostRef.current = target
       setRemotePath('.')
       setRemoteSelected(null)
       setPin(nextPin)
+      pinRef.current = nextPin
       setPinPrompt(null)
+      pinPromptOpenRef.current = false
+      setError(null)
       const list = await api().listRemote(next, '.')
       setRemoteEntries(list)
       await api().updateSession({
@@ -122,29 +129,45 @@ export function ClientSimple({
     [onToast]
   )
 
-  const tryAutoConnect = useCallback(
-    async (target: DiscoveredHost, nextPin: string) => {
-      if (connRef.current || busyRef.current) return
-      const key = `${target.host}:${target.port}`
-      if (attemptedRef.current.has(key)) return
-      attemptedRef.current.add(key)
-      busyRef.current = true
+  const connectWithPin = useCallback(
+    async (target: DiscoveredHost | { host: string; port: number; name?: string }, nextPin: string) => {
+      const pinValue = nextPin.trim()
+      if (!target?.host || pinValue.length < 4) {
+        setError({ title: 'Host and PIN required', detail: 'PIN must be at least 4 characters' })
+        return false
+      }
+      if (connectingRef.current || connRef.current) return false
+
+      const key = `${target.host}:${target.port || 17890}`
+      connectingRef.current = true
+      handledHostRef.current.add(key)
       setBusy(true)
       setError(null)
-      setStatusNote(`Connecting to ${target.name}…`)
+      setStatusNote(`Connecting to ${target.name || target.host}…`)
       try {
-        await finishConnect(target.host, target.port, nextPin, target.name)
+        await finishConnect(target.host, target.port || 17890, pinValue, target.name)
+        failedPinRef.current.delete(key)
+        return true
       } catch (e) {
-        attemptedRef.current.delete(key)
+        // Remember this PIN failed so discovery won't auto-retry it in a loop
+        failedPinRef.current.set(key, pinValue)
         setError({
-          title: `Could not connect to ${target.name}`,
+          title: `Could not connect to ${target.name || target.host}`,
           detail: e instanceof Error ? e.message : 'Check the PIN and try again'
         })
-        setStatusNote(`Waiting for PIN to join ${target.name}`)
-        setPinPrompt(target)
-        setPinDraft('')
+        setStatusNote(`Enter the correct PIN for ${target.name || target.host}`)
+        // Keep modal open so the user can type a different PIN
+        setPinPrompt({
+          id: key,
+          name: target.name || target.host,
+          host: target.host,
+          port: target.port || 17890,
+          lastSeen: Date.now()
+        })
+        pinPromptOpenRef.current = true
+        return false
       } finally {
-        busyRef.current = false
+        connectingRef.current = false
         setBusy(false)
       }
     },
@@ -214,32 +237,34 @@ export function ClientSimple({
     }
   }, [])
 
-  // When a host is discovered, auto-connect with saved PIN or ask for PIN once.
+  // When a host is discovered: auto-connect once with saved PIN, otherwise ask for PIN once.
   useEffect(() => {
-    if (booting || conn || !autoReconnect || hosts.length === 0 || busy) return
+    if (booting || conn || !autoReconnect || hosts.length === 0) return
+    if (connectingRef.current || pinPromptOpenRef.current) return
 
     const preferred = preferredHostRef.current
     const target =
-      (preferred && hosts.find((h) => h.host === preferred)) ||
-      hosts[0]
-
+      (preferred && hosts.find((h) => h.host === preferred)) || hosts[0]
     if (!target) return
-    const key = `${target.host}:${target.port}`
-    setHost(target.host)
 
+    const key = `${target.host}:${target.port}`
+    if (handledHostRef.current.has(key)) return
+
+    setHost(target.host)
     const knownPin = pinRef.current.trim()
-    if (knownPin.length >= 4) {
-      void tryAutoConnect(target, knownPin)
+    const failedPin = failedPinRef.current.get(key)
+
+    if (knownPin.length >= 4 && knownPin !== failedPin) {
+      void connectWithPin(target, knownPin)
       return
     }
 
-    if (!promptedRef.current.has(key) && !pinPrompt) {
-      promptedRef.current.add(key)
-      setPinPrompt(target)
-      setPinDraft('')
-      setStatusNote(`VaultBay host found: ${target.name} — enter PIN to connect`)
-    }
-  }, [hosts, conn, autoReconnect, busy, booting, pinPrompt, tryAutoConnect])
+    handledHostRef.current.add(key)
+    setPinPrompt(target)
+    pinPromptOpenRef.current = true
+    setPinDraft('')
+    setStatusNote(`VaultBay host found: ${target.name} — enter PIN to connect`)
+  }, [hosts, conn, autoReconnect, booting, connectWithPin])
 
   useEffect(() => {
     if (!localPath) return
@@ -280,40 +305,50 @@ export function ClientSimple({
   )
 
   async function connect(selectedHost?: string, pinOverride?: string) {
-    const target = selectedHost || host
+    const targetHost = selectedHost || host
     const nextPin = (pinOverride ?? pin).trim()
-    if (!target || nextPin.length < 4) {
+    if (!targetHost || nextPin.length < 4) {
       setError({ title: 'Host and PIN required', detail: 'PIN must be at least 4 characters' })
       return
     }
-    setBusy(true)
-    setError(null)
-    setStatusNote(`Connecting to ${target}…`)
-    try {
-      const match = hosts.find((h) => h.host === target)
-      await finishConnect(target, match?.port || 17890, nextPin, match?.name)
-    } catch (e) {
-      setError({
-        title: 'Connection failed',
-        detail: e instanceof Error ? e.message : 'Check Wi‑Fi, host sharing, and PIN'
-      })
-      setStatusNote('Connection failed — check PIN and try again')
-    } finally {
-      setBusy(false)
-    }
+    const match = hosts.find((h) => h.host === targetHost)
+    // Manual connect: allow retry even if this PIN previously failed (network blip)
+    const key = `${targetHost}:${match?.port || 17890}`
+    failedPinRef.current.delete(key)
+    await connectWithPin(
+      match || { host: targetHost, port: 17890, name: targetHost },
+      nextPin
+    )
   }
 
   async function submitPinPrompt() {
-    if (!pinPrompt) return
+    if (!pinPrompt || connectingRef.current) return
     const nextPin = pinDraft.trim()
     if (nextPin.length < 4) {
       setError({ title: 'PIN too short', detail: 'Enter the PIN shown on the shop/host PC' })
       return
     }
+    // User submitted from the modal — always attempt, don't get stuck on prior failure
+    failedPinRef.current.delete(`${pinPrompt.host}:${pinPrompt.port}`)
     setPin(nextPin)
     pinRef.current = nextPin
+    await connectWithPin(pinPrompt, nextPin)
+  }
+
+  function dismissPinPrompt() {
     setPinPrompt(null)
-    await tryAutoConnect(pinPrompt, nextPin)
+    pinPromptOpenRef.current = false
+    setStatusNote('PIN skipped — pick a host or enter PIN below when ready')
+  }
+
+  function disconnect() {
+    setConn(null)
+    connRef.current = null
+    handledHostRef.current.clear()
+    failedPinRef.current.clear()
+    setRemoteEntries([])
+    setRemoteSelected(null)
+    setStatusNote('Disconnected — will reconnect when a host is found')
   }
 
   async function openRemote(nextPath: string) {
@@ -485,9 +520,11 @@ export function ClientSimple({
                     onClick={() => {
                       setHost(h.host)
                       preferredHostRef.current = h.host
-                      if (pin.trim().length >= 4) connect(h.host)
-                      else {
+                      if (pin.trim().length >= 4) {
+                        void connect(h.host)
+                      } else {
                         setPinPrompt(h)
+                        pinPromptOpenRef.current = true
                         setPinDraft('')
                       }
                     }}
@@ -560,13 +597,17 @@ export function ClientSimple({
           <Modal
             title={`Connect to ${pinPrompt.name}`}
             hint={`Host found at ${pinPrompt.host}. Enter the PIN from the shop/host PC. It will be remembered for next time.`}
-            onClose={() => setPinPrompt(null)}
+            onClose={dismissPinPrompt}
             actions={
               <>
-                <button className="btn secondary" onClick={() => setPinPrompt(null)}>
+                <button className="btn secondary" onClick={dismissPinPrompt}>
                   Not now
                 </button>
-                <button className="btn" disabled={busy || pinDraft.trim().length < 4} onClick={submitPinPrompt}>
+                <button
+                  className="btn"
+                  disabled={busy || pinDraft.trim().length < 4}
+                  onClick={() => void submitPinPrompt()}
+                >
                   Connect
                 </button>
               </>
@@ -579,7 +620,7 @@ export function ClientSimple({
                 value={pinDraft}
                 onChange={(e) => setPinDraft(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') submitPinPrompt()
+                  if (e.key === 'Enter') void submitPinPrompt()
                 }}
                 placeholder="Shop PIN"
                 autoFocus
@@ -612,7 +653,7 @@ export function ClientSimple({
           <button className="btn secondary" disabled={busy} onClick={refreshBoth}>
             <RefreshCw size={16} /> Refresh both
           </button>
-          <button className="btn ghost" onClick={() => setConn(null)}>
+          <button className="btn ghost" onClick={disconnect}>
             Disconnect
           </button>
           <button className="btn ghost" onClick={onAdvanced}>
